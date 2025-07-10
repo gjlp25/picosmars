@@ -2,21 +2,22 @@ import network
 import socket
 import time
 import machine
+import json
 from SimplyRobotics import KitronikSimplyRobotics
 from secrets import WIFI_SSID, WIFI_PASSWORD
+from rangefinder import HCSR04
 
-# Configuratie
+# Config
 DEFAULT_SPEED = 50
 MOTOR_LEFT = 0
 MOTOR_RIGHT = 3
 
-# Globale variabelen
 robot = None
 current_speed = DEFAULT_SPEED
 safety_enabled = True
-led = machine.Pin("LED", machine.Pin.OUT)  # ingebouwde led Pico W
+led = machine.Pin("LED", machine.Pin.OUT)
+sensor = HCSR04(trigger_pin=17, echo_pin=16)
 
-# Hardware initialisatie
 def init_hardware():
     global robot
     try:
@@ -28,22 +29,16 @@ def init_hardware():
         print(f"Fout bij hardware init: {e}")
         return False
 
-# Motoren aansturen met safety check
 def control_motors(action):
     global robot, current_speed, safety_enabled
-
     if not robot:
         return False
-
     try:
         if safety_enabled and action != "stop":
             print("Beweging geblokkeerd door veiligheid.")
             return False
-
-        # Stop altijd eerst
         robot.motors[MOTOR_LEFT].off()
         robot.motors[MOTOR_RIGHT].off()
-
         if action == "forward":
             robot.motors[MOTOR_LEFT].on("r", current_speed)
             robot.motors[MOTOR_RIGHT].on("r", current_speed)
@@ -56,19 +51,16 @@ def control_motors(action):
         elif action == "right":
             robot.motors[MOTOR_LEFT].on("f", current_speed)
             robot.motors[MOTOR_RIGHT].on("r", current_speed)
-        
         return True
-
     except Exception as e:
         print(f"Motorfout: {e}")
         return False
 
-# HTML pagina met mooie grid-interface
 def create_html(speed, safety_on):
     return f"""<!DOCTYPE html>
 <html>
 <head>
-<title>Robot Control with Speed</title>
+<title>Robot Control Live Distance</title>
 <meta charset="UTF-8">
 <style>
 body {{
@@ -110,24 +102,12 @@ button {{
     cursor: pointer;
     color: white;
 }}
-.speed-btn {{
-    background-color: #007bff;
-}}
-.speed-btn:hover {{
-    background-color: #0056b3;
-}}
-.dir-btn {{
-    background-color: #28a745;
-}}
-.dir-btn:hover {{
-    background-color: #1e7e34;
-}}
-.stop-btn {{
-    background-color: #dc3545;
-}}
-.stop-btn:hover {{
-    background-color: #c82333;
-}}
+.speed-btn {{ background-color: #007bff; }}
+.speed-btn:hover {{ background-color: #0056b3; }}
+.dir-btn {{ background-color: #28a745; }}
+.dir-btn:hover {{ background-color: #1e7e34; }}
+.stop-btn {{ background-color: #dc3545; }}
+.stop-btn:hover {{ background-color: #c82333; }}
 .footer {{
     background: #f0f0f0;
     padding: 10px;
@@ -136,13 +116,27 @@ button {{
     font-size: 14px;
 }}
 </style>
+<script>
+function fetchDistance() {{
+    fetch('/distance')
+    .then(response => response.json())
+    .then(data => {{
+        document.getElementById('distance').innerText = data.distance;
+    }})
+    .catch(err => {{
+        document.getElementById('distance').innerText = "No reading";
+    }});
+}}
+setInterval(fetchDistance, 500);
+</script>
 </head>
 <body>
 <div class="container">
-    <h2>🤖 Robot Control with Speed</h2>
+    <h2>🤖 Robot Control</h2>
     <div class="status">
-        Current Speed: {speed}%<br>
-        Safety: {"ON" if safety_on else "OFF"}
+        Speed: {speed}%<br>
+        Safety: {"ON" if safety_on else "OFF"}<br>
+        Distance: <span id="distance">...</span>
     </div>
     <form method="GET">
         <div>
@@ -166,55 +160,46 @@ button {{
         </button>
     </form>
     <div class="footer">
-        Kitronik Simply Robotics Configuration:<br>
-        Motor: Variable Speed 0-100% | PWM: Auto<br>
-        Speed Control Active
+        Kitronik Simply Robotics + HC-SR04 Live
     </div>
 </div>
 </body>
 </html>"""
 
-# WiFi verbinding + LED indicatie
 def connect_wifi():
     wlan = network.WLAN(network.STA_IF)
     wlan.active(True)
-
+    wlan.config(pm = 0xa11140)
     if not wlan.isconnected():
-        print("Verbinding maken met WiFi...")
+        print("WiFi verbinden...")
         wlan.connect(WIFI_SSID, WIFI_PASSWORD)
-
         timeout = 20
         while not wlan.isconnected() and timeout > 0:
             led.toggle()
             time.sleep(0.5)
             timeout -= 1
         led.off()
-        print()
-
     if wlan.isconnected():
         ip = wlan.ifconfig()[0]
         print(f"Verbonden: {ip}")
-        led.on()  # continue branden
+        led.on()
         return ip
     else:
-        print("WiFi verbinding mislukt")
+        print("Geen WiFi verbinding")
         led.off()
         return None
 
-# Hoofdprogramma
 def main():
     global current_speed, safety_enabled
 
     print("Robot Control starten...")
 
     if not init_hardware():
-        print("Herstart wegens hardware probleem...")
         led.off()
         machine.reset()
 
     ip = connect_wifi()
     if not ip:
-        print("Geen WiFi, herstart...")
         led.off()
         machine.reset()
 
@@ -226,69 +211,50 @@ def main():
         server.listen(1)
         print(f"Server draait op: http://{ip}")
     except Exception as e:
-        print(f"Server fout: {e}")
         led.off()
         machine.reset()
 
     while True:
         try:
-            print("Wacht op verbinding...")
             client, addr = server.accept()
-            print(f"Client verbonden: {addr}")
-
             request = client.recv(1024).decode()
-            print("Request ontvangen")
+            
+            if 'GET /distance' in request:
+                distance = sensor.measure_distance()
+                dist_str = f"{distance:.1f} cm" if distance else "No reading"
+                response = json.dumps({"distance": dist_str})
+                client.send("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n".encode())
+                client.send(response.encode())
+                client.close()
+                continue
 
+            # gewone pagina
             if 'GET /?' in request:
-                try:
-                    params = request.split('GET /?')[1].split(' ')[0]
-                    pairs = params.split('&')
-
-                    for pair in pairs:
-                        if '=' in pair:
-                            key, value = pair.split('=', 1)
-                            if key == 'action':
-                                if value == 'toggle_safety':
-                                    safety_enabled = not safety_enabled
-                                    print(f"Safety toggled: {safety_enabled}")
-                                elif value == 'speed_up':
-                                    current_speed = min(100, current_speed + 10)
-                                    print(f"Snelheid verhoogd naar: {current_speed}%")
-                                elif value == 'speed_down':
-                                    current_speed = max(10, current_speed - 10)
-                                    print(f"Snelheid verlaagd naar: {current_speed}%")
-                                else:
-                                    print(f"Actie uitvoeren: {value}")
-                                    control_motors(value)
-                except Exception as e:
-                    print(f"Fout bij parsen: {e}")
+                params = request.split('GET /?')[1].split(' ')[0]
+                pairs = params.split('&')
+                for pair in pairs:
+                    if '=' in pair:
+                        key, value = pair.split('=', 1)
+                        if key == 'action':
+                            if value == 'toggle_safety':
+                                safety_enabled = not safety_enabled
+                            elif value == 'speed_up':
+                                current_speed = min(100, current_speed + 10)
+                            elif value == 'speed_down':
+                                current_speed = max(10, current_speed - 10)
+                            else:
+                                control_motors(value)
 
             html = create_html(current_speed, safety_enabled)
-            response = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n"
-            client.send(response.encode())
+            client.send("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n".encode())
             client.send(html.encode())
             client.close()
-            print("Response verzonden")
 
-        except KeyboardInterrupt:
-            print("Stoppen...")
-            break
         except Exception as e:
-            print(f"Fout: {e}")
             try:
                 client.close()
             except:
                 pass
 
-    try:
-        server.close()
-        led.off()
-        if robot:
-            robot.motors[MOTOR_LEFT].off()
-            robot.motors[MOTOR_RIGHT].off()
-    except:
-        pass
-
-# Run
 if __name__ == "__main__":
     main()

@@ -14,6 +14,7 @@ MOTOR_RIGHT = 3
 robot = None
 current_speed = DEFAULT_SPEED
 safety_enabled = True
+led = machine.Pin("LED", machine.Pin.OUT)  # ingebouwde led Pico W
 
 # Hardware initialisatie
 def init_hardware():
@@ -62,7 +63,7 @@ def control_motors(action):
         print(f"Motorfout: {e}")
         return False
 
-# HTML pagina met grid-layout zoals op jouw screenshot
+# HTML pagina met mooie grid-interface
 def create_html(speed, safety_on):
     return f"""<!DOCTYPE html>
 <html>
@@ -173,7 +174,7 @@ button {{
 </body>
 </html>"""
 
-# WiFi connectie
+# WiFi verbinding + LED indicatie
 def connect_wifi():
     wlan = network.WLAN(network.STA_IF)
     wlan.active(True)
@@ -184,32 +185,37 @@ def connect_wifi():
 
         timeout = 20
         while not wlan.isconnected() and timeout > 0:
-            print(".", end="")
-            time.sleep(1)
+            led.toggle()
+            time.sleep(0.5)
             timeout -= 1
+        led.off()
         print()
 
     if wlan.isconnected():
         ip = wlan.ifconfig()[0]
         print(f"Verbonden: {ip}")
+        led.on()  # continue branden
         return ip
     else:
         print("WiFi verbinding mislukt")
+        led.off()
         return None
 
-# Main programma
+# Hoofdprogramma
 def main():
     global current_speed, safety_enabled
 
     print("Robot Control starten...")
 
     if not init_hardware():
-        print("Herstarten wegens hardware fout...")
+        print("Herstart wegens hardware probleem...")
+        led.off()
         machine.reset()
 
     ip = connect_wifi()
     if not ip:
-        print("Geen WiFi, herstarten...")
+        print("Geen WiFi, herstart...")
+        led.off()
         machine.reset()
 
     try:
@@ -221,6 +227,7 @@ def main():
         print(f"Server draait op: http://{ip}")
     except Exception as e:
         print(f"Server fout: {e}")
+        led.off()
         machine.reset()
 
     while True:
@@ -275,6 +282,7 @@ def main():
 
     try:
         server.close()
+        led.off()
         if robot:
             robot.motors[MOTOR_LEFT].off()
             robot.motors[MOTOR_RIGHT].off()
